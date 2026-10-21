@@ -65,6 +65,11 @@
     touch-action: none;
   }
   #table { position: fixed; inset: 0; cursor: crosshair; }
+  #table.orbiting { cursor: grabbing; }
+  .lock {
+    margin-left: 6px; padding: 1px 6px; border-radius: 99px;
+    border: 1px solid var(--brass); color: var(--brass); letter-spacing: 0.08em;
+  }
   #table canvas { display: block; width: 100%; height: 100%; }
 
   .hud {
@@ -235,11 +240,12 @@
 
 <div class="bottom">
   <div class="power">
-    <div class="label">Power <span id="powerPct">0%</span></div>
+    <div class="label">Power <span id="powerPct">0%</span> <span class="lock" id="lockTag" hidden>Aim locked</span></div>
     <div class="bar"><i id="powerBar"></i></div>
   </div>
   <div class="right">
-    <div class="help">Drag back from anywhere and release to shoot<br><kbd>←</kbd><kbd>→</kbd> aim · <kbd>↑</kbd><kbd>↓</kbd> power · <kbd>Space</kbd> shoot</div>
+    <div class="help">Move the mouse to aim · click to lock · hold <kbd>Space</kbd> for power, release to shoot<br>Right-drag turns the table · scroll zooms · <kbd>Shift</kbd> fine aim · <kbd>V</kbd> resets the view</div>
+    <button class="ghost-btn" id="viewBtn" type="button">Reset view</button>
     <button class="ghost-btn" id="rerack" type="button">Re-rack</button>
   </div>
 </div>
@@ -264,7 +270,8 @@
       </div>
     </div>
     <ul class="rules">
-      <li>Drag back like a slingshot, then release. Longer pull, harder shot.</li>
+      <li>Aim with the mouse. Hold Space to build power and release to shoot. Click to lock your aim first if you like.</li>
+      <li>Right-drag to turn the table, scroll to zoom. On a touch screen, drag back and release instead.</li>
       <li>Sink any ball to score a point and shoot again.</li>
       <li>Scratch the cue ball and your turn ends.</li>
       <li>The 8-ball goes last. Sink it early, or scratch on it, and you lose.</li>
@@ -373,7 +380,7 @@
 
   const clothMat = new THREE.MeshLambertMaterial({ map: clothTexture() });
   const cushionMat = new THREE.MeshLambertMaterial({ color: 0x22688a });
-  const woodMat = new THREE.MeshPhongMaterial({ color: 0x4a2a17, shininess: 60, specular: 0x332211 });
+  const woodMat = new THREE.MeshPhongMaterial({ color: 0x4a2a17, shininess: 20, specular: 0x140d08 });
   const pearlMat = new THREE.MeshPhongMaterial({ color: 0xf3ead6, shininess: 100 });
   const brassMat = new THREE.MeshPhongMaterial({ color: 0xc9a14a, shininess: 90, specular: 0xffe6a0 });
   const holeMat = new THREE.MeshBasicMaterial({ color: 0x050505 });
@@ -712,6 +719,8 @@
     cpuToken++;
     Object.assign(game, { state: 'aim', turn: 0, scores: [0, 0], trays: [[], []], angle: 0, power: 0, shotSpeed: null });
     $('intro').hidden = true; $('over').hidden = true;
+    if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+    setLock(false);
     setStatus('Player 1 breaks');
     renderHud();
   }
@@ -734,6 +743,8 @@
     if (game.state !== 'aim' || game.power < 0.03) return;
     ensureAudio();
     shot = { potted: [], contact: false };
+    charging = false;
+    setLock(false);
     game.state = 'strike';
     strikeT = 0;
   }
@@ -1014,16 +1025,61 @@
     return raycaster.ray.intersectPlane(tablePlane, hitPt) ? { x: hitPt.x, z: hitPt.z } : null;
   }
 
-  let drag = null;
+  let drag = null;          // touch: slingshot drag
+  let orbit = null;         // mouse: right-drag turns the table
+  let aimLocked = false;
+  let charging = false, chargeDir = 1;
+  let lastRaw = null;
+
+  const canAim = () => game.state === 'aim';
+  function setLock(on) { aimLocked = on; $('lockTag').hidden = !on; }
+  function cancelCharge() { charging = false; game.power = 0; renderPower(); }
+
+  // Mouse aiming: the cue points from the cue ball toward the pointer. Shift slows it down for fine aim.
+  function aimAtPointer(e) {
+    if (!canAim() || aimLocked || charging) return;
+    const p = pointerToTable(e);
+    if (!p) return;
+    const raw = Math.atan2(p.z - cue.z, p.x - cue.x);
+    if (e.shiftKey) {
+      if (lastRaw !== null) { const d = raw - lastRaw; game.angle += Math.atan2(Math.sin(d), Math.cos(d)) * 0.12; }
+    } else {
+      game.angle = raw;
+    }
+    lastRaw = raw;
+  }
+
+  host.addEventListener('contextmenu', (e) => e.preventDefault());
   host.addEventListener('pointerdown', (e) => {
-    if (game.state !== 'aim') return;
     ensureAudio();
+    if (e.pointerType === 'mouse') {
+      if (e.button === 2 || e.button === 1) {
+        orbit = { x: e.clientX, y: e.clientY, id: e.pointerId };
+        host.setPointerCapture(e.pointerId);
+        host.classList.add('orbiting');
+        e.preventDefault();
+      } else if (e.button === 0 && canAim()) {
+        setLock(!aimLocked);
+        if (!aimLocked) { lastRaw = null; aimAtPointer(e); }
+      }
+      return;
+    }
+    if (!canAim()) return;
     const p = pointerToTable(e);
     if (!p) return;
     drag = { start: p, id: e.pointerId };
     host.setPointerCapture(e.pointerId);
   });
   host.addEventListener('pointermove', (e) => {
+    if (orbit && e.pointerId === orbit.id) {
+      view.theta -= (e.clientX - orbit.x) * 0.006;
+      view.phi = Math.min(1.25, Math.max(0.05, view.phi - (e.clientY - orbit.y) * 0.005));
+      orbit.x = e.clientX; orbit.y = e.clientY;
+      view.custom = true;
+      applyView();
+      return;
+    }
+    if (e.pointerType === 'mouse') { aimAtPointer(e); return; }
     if (!drag || e.pointerId !== drag.id) return;
     const p = pointerToTable(e);
     if (!p) return;
@@ -1031,30 +1087,54 @@
     const len = Math.hypot(dx, dz);
     if (len > 0.01) game.angle = Math.atan2(dz, dx);
     game.power = Math.min(1, len / 0.55);
-    renderHud();
+    renderPower();
   });
-  const endDrag = (e) => {
+  const endPointer = (e) => {
+    if (orbit && e.pointerId === orbit.id) { orbit = null; host.classList.remove('orbiting'); return; }
     if (!drag || e.pointerId !== drag.id) return;
     drag = null;
     if (game.power >= 0.03) shoot();
-    else { game.power = 0; renderHud(); }
+    else cancelCharge();
   };
-  host.addEventListener('pointerup', endDrag);
-  host.addEventListener('pointercancel', (e) => { if (drag && e.pointerId === drag.id) { drag = null; game.power = 0; renderHud(); } });
+  host.addEventListener('pointerup', endPointer);
+  host.addEventListener('pointercancel', (e) => {
+    if (orbit && e.pointerId === orbit.id) { orbit = null; host.classList.remove('orbiting'); }
+    if (drag && e.pointerId === drag.id) { drag = null; cancelCharge(); }
+  });
+  host.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    view.zoom = Math.min(1.6, Math.max(0.35, view.zoom * Math.exp(e.deltaY * 0.001)));
+    view.custom = true;
+    applyView();
+  }, { passive: false });
 
+  const inMenu = () => game.state === 'intro' || game.state === 'over';
   window.addEventListener('keydown', (e) => {
-    if (game.state === 'intro' || game.state === 'over') {
+    if (inMenu()) {
       if (e.key === 'Enter') { newGame(); e.preventDefault(); }
       return;
     }
-    if (game.state !== 'aim') return;
+    if (e.key === ' ') e.preventDefault();
+    if (e.key === 'v' || e.key === 'V') { resetView(); return; }
+    if (!canAim()) return;
     const fine = e.shiftKey ? 0.0025 : 0.02;
-    if (e.key === 'ArrowLeft') { game.angle -= fine; e.preventDefault(); }
-    else if (e.key === 'ArrowRight') { game.angle += fine; e.preventDefault(); }
-    else if (e.key === 'ArrowUp') { game.power = Math.min(1, game.power + 0.05); renderHud(); e.preventDefault(); }
-    else if (e.key === 'ArrowDown') { game.power = Math.max(0, game.power - 0.05); renderHud(); e.preventDefault(); }
-    else if (e.key === ' ') { ensureAudio(); shoot(); e.preventDefault(); }
+    if (e.key === 'ArrowLeft') { game.angle -= fine; setLock(true); e.preventDefault(); }
+    else if (e.key === 'ArrowRight') { game.angle += fine; setLock(true); e.preventDefault(); }
+    else if (e.key === ' ' && !e.repeat && !charging) {
+      ensureAudio();
+      charging = true; chargeDir = 1; game.power = 0;
+      renderPower();
+    } else if (e.key === 'Escape' && charging) cancelCharge();
   });
+  window.addEventListener('keyup', (e) => {
+    if (e.key !== ' ' || inMenu()) return;
+    e.preventDefault();
+    if (!charging) return;
+    charging = false;
+    if (canAim() && game.power >= 0.03) shoot();
+    else cancelCharge();
+  });
+  window.addEventListener('blur', () => { if (charging) cancelCharge(); });
 
   $('startBtn').addEventListener('click', () => { ensureAudio(); newGame(); });
   $('againBtn').addEventListener('click', newGame);
@@ -1067,8 +1147,20 @@
   document.querySelectorAll('input[name="opp"]').forEach((r) =>
     r.addEventListener('change', () => { $('levelRow').hidden = $('oppFriend').checked; }));
   $('rerack').addEventListener('click', newGame);
+  $('viewBtn').addEventListener('click', () => { resetView(); $('viewBtn').blur(); });
 
-  // ---------- Camera fit ----------
+  // ---------- Camera: fitted overview, turnable with right-drag and zoomable ----------
+  const view = { theta: 0, phi: 0.284, zoom: 1, fit: 3, custom: false };
+  function applyView() {
+    const r = view.fit * view.zoom;
+    camera.position.set(
+      r * Math.sin(view.phi) * Math.sin(view.theta),
+      r * Math.cos(view.phi),
+      r * Math.sin(view.phi) * Math.cos(view.theta)
+    );
+    camera.up.set(0, 1, 0);
+    camera.lookAt(0, 0, 0);
+  }
   function resize() {
     const w = host.clientWidth, h = host.clientHeight;
     renderer.setSize(w, h, false);
@@ -1077,17 +1169,12 @@
     const long = outerW + 0.15, short = outerH + 0.15;
     const tanV = Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
     const screenW = portrait ? short : long, screenH = (portrait ? long : short) * 1.28; // room for HUD
-    const dist = Math.max(screenH / 2 / tanV, screenW / 2 / (tanV * camera.aspect)) * 1.04;
-    if (portrait) {
-      camera.up.set(1, 0, 0);
-      camera.position.set(-dist * 0.28, dist * 0.96, 0);
-    } else {
-      camera.up.set(0, 0, -1);
-      camera.position.set(0, dist * 0.96, dist * 0.28);
-    }
-    camera.lookAt(0, 0, 0);
+    view.fit = Math.max(screenH / 2 / tanV, screenW / 2 / (tanV * camera.aspect)) * 1.04;
+    if (!view.custom) { view.theta = portrait ? -Math.PI / 2 : 0; view.phi = 0.284; view.zoom = 1; }
+    applyView();
     camera.updateProjectionMatrix();
   }
+  function resetView() { view.custom = false; resize(); }
   window.addEventListener('resize', resize);
   resize();
 
@@ -1102,6 +1189,12 @@
     last = now;
 
     let pull = 0;
+    if (charging && game.state === 'aim') {
+      game.power += (chargeDir * dt) / 1.3;
+      if (game.power >= 1) { game.power = 1; chargeDir = -1; }
+      if (game.power <= 0) { game.power = 0; chargeDir = 1; }
+      renderPower();
+    }
     if (game.state === 'cpu' && cpu) {
       // Swing the cue round to the planned line, draw back, then shoot
       cpu.t += dt;
