@@ -103,7 +103,8 @@
     color: var(--muted);
   }
   .plaque.active .who { color: var(--brass); }
-  .plaque .score { font-family: var(--display); font-size: 28px; line-height: 1; font-variant-numeric: tabular-nums; }
+  .plaque .score { font-family: var(--display); font-size: 24px; line-height: 1; font-variant-numeric: tabular-nums; }
+  .chip.down { opacity: 0.22; }
   .tray { display: flex; gap: 3px; flex-wrap: wrap; min-height: 14px; }
   .plaque.p2 .tray { justify-content: flex-end; }
   .chip {
@@ -272,9 +273,10 @@
     <ul class="rules">
       <li>Aim with the mouse. Hold Space to build power and release to shoot. Click to lock your aim first if you like.</li>
       <li>Right-drag to turn the table, scroll to zoom. On a touch screen, drag back and release instead.</li>
-      <li>Sink any ball to score a point and shoot again.</li>
-      <li>Scratch the cue ball and your turn ends.</li>
-      <li>The 8-ball goes last. Sink it early, or scratch on it, and you lose.</li>
+      <li>After the break the table is open. The first ball you sink makes your group: solids (1–7) or stripes (9–15).</li>
+      <li>Hit one of your own balls first. After that, a ball must drop or touch a cushion. Sink one of yours to keep shooting.</li>
+      <li>A foul (scratch, wrong ball first, no cushion) gives your opponent ball in hand anywhere on the table.</li>
+      <li>Clear your group, then sink the 8 to win. Sink the 8 early or on a foul and you lose.</li>
     </ul>
     <button class="go" id="startBtn" type="button">Break</button>
   </div>
@@ -660,7 +662,7 @@
         b.x = cx + nx * R; b.z = cz + nz * R;
         const vn = b.vx * nx + b.vz * nz;
         if (vn < 0) {
-          ev.cushion(-vn);
+          ev.cushion(-vn, b);
           const tx = b.vx - vn * nx, tz = b.vz - vn * nz;
           b.vx = tx * 0.95 - vn * CUSHION_E * nx;
           b.vz = tz * 0.95 - vn * CUSHION_E * nz;
@@ -678,9 +680,12 @@
         b.mesh.quaternion.premultiply(q);
       }
     },
-    hit(a, c, vn) { if (a === cue || c === cue) shot.contact = true; clack(vn); },
+    hit(a, c, vn) {
+      if (shot.firstHit === null && (a === cue || c === cue)) shot.firstHit = (a === cue ? c : a).n;
+      clack(vn);
+    },
     pot(b, p) { potBall(b, p); },
-    cushion(v) { thud(v); },
+    cushion(v) { if (shot.firstHit !== null) shot.rail = true; thud(v); },
   };
   function physicsStep(dt) { stepWorld(balls, dt, realEvents); }
 
@@ -716,17 +721,18 @@
 
   // ---------- Game state ----------
   const game = {
-    state: 'intro',       // intro | aim | cpu | strike | rolling | over
+    state: 'intro',       // intro | place | aim | cpu | strike | rolling | over
     mode: 'cpu',          // cpu | pvp
     level: 'medium',      // easy | medium | hard
     shotSpeed: null,      // set by the computer to shoot at an exact speed
     turn: 0,
-    scores: [0, 0],
-    trays: [[], []],
+    groups: [null, null], // 'solids' | 'stripes' once the table is no longer open
+    isBreak: true,
+    ballInHand: false,
     angle: 0,             // aim direction, radians in the x/z plane
     power: 0,
   };
-  let shot = { potted: [], contact: false };
+  let shot = { potted: [], firstHit: null, rail: false, st: null };
   const LEVEL_NAMES = { easy: 'Easy', medium: 'Medium', hard: 'Hard' };
   const name = (i) => (game.mode === 'cpu' && i === 1 ? 'Computer' : 'Player ' + (i + 1));
 
@@ -758,16 +764,23 @@
     $('powerBar').style.width = pct + '%';
     $('powerPct').textContent = pct + '%';
   }
+  const GROUP_LABEL = { solids: 'Solids', stripes: 'Stripes' };
+  function chip(n, down) {
+    const bg = n > 8 ? `linear-gradient(#f6f1e3 28%, ${colorOf(n)} 28% 72%, #f6f1e3 72%)` : colorOf(n);
+    const fg = n === 8 ? '#f6f1e3' : '#111';
+    return `<span class="chip${down ? ' down' : ''}" style="background:${bg};color:${fg}">${n}</span>`;
+  }
   function renderHud() {
     $('name1').textContent = game.mode === 'cpu' ? `Computer · ${LEVEL_NAMES[game.level]}` : 'Player 2';
     for (const p of [0, 1]) {
-      $('score' + p).textContent = game.scores[p];
+      const g = game.groups[p];
+      $('score' + p).textContent = g ? GROUP_LABEL[g] : 'Open table';
       $('plaque' + p).classList.toggle('active', game.turn === p && game.state !== 'over');
-      $('tray' + p).innerHTML = game.trays[p].map((n) => {
-        const bg = n > 8 ? `linear-gradient(#f6f1e3 28%, ${colorOf(n)} 28% 72%, #f6f1e3 72%)` : colorOf(n);
-        const fg = n === 8 ? '#f6f1e3' : '#111';
-        return `<span class="chip" style="background:${bg};color:${fg}">${n}</span>`;
-      }).join('');
+      if (!g) { $('tray' + p).innerHTML = ''; continue; }
+      const nums = g === 'solids' ? [1, 2, 3, 4, 5, 6, 7] : [9, 10, 11, 12, 13, 14, 15];
+      const cleared = nums.every((n) => !balls[n].active);
+      // Your seven balls (sunk ones fade out), then the 8, which lights up once you're on it
+      $('tray' + p).innerHTML = nums.map((n) => chip(n, !balls[n].active)).join('') + chip(8, !cleared);
     }
     renderPower();
   }
@@ -777,11 +790,11 @@
     rack();
     cpu = null;
     cpuToken++;
-    Object.assign(game, { state: 'aim', turn: 0, scores: [0, 0], trays: [[], []], angle: 0, power: 0, shotSpeed: null });
+    Object.assign(game, { state: 'aim', turn: 0, groups: [null, null], isBreak: true, ballInHand: false, angle: 0, power: 0, shotSpeed: null });
     $('intro').hidden = true; $('over').hidden = true;
     if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
     setLock(false);
-    setStatus('Player 1 breaks');
+    setStatus(`${name(0)} breaks`);
     renderHud();
   }
 
@@ -799,10 +812,33 @@
     cue.mesh.position.set(cue.x, R, cue.z);
   }
 
+  function moveCueTo(x, z) {
+    x = Math.max(-(W / 2 - R), Math.min(W / 2 - R, x));
+    z = Math.max(-(H / 2 - R), Math.min(H / 2 - R, z));
+    if (!cueSpotOk(x, z)) return;
+    cue.x = x; cue.z = z;
+    cue.mesh.position.set(x, R, z);
+  }
+  function placeHere() {
+    if (game.state !== 'place') return;
+    game.ballInHand = false;
+    game.state = 'aim';
+    setStatus(`${name(game.turn)} to shoot.`);
+  }
+  function respotEight() {
+    // Back on the foot spot, or the nearest free spot behind it toward the foot rail
+    const e = balls[8];
+    let x = W / 4;
+    while (x < W / 2 - R && !balls.every((b) => b === e || !b.active || Math.hypot(b.x - x, b.z) > 2.02 * R)) x += R / 2;
+    Object.assign(e, { x, z: 0, vx: 0, vz: 0, active: true, sink: null });
+    e.mesh.visible = true; e.mesh.scale.setScalar(1);
+    e.mesh.position.set(x, R, 0);
+  }
+
   function shoot() {
     if (game.state !== 'aim' || game.power < 0.03) return;
     ensureAudio();
-    shot = { potted: [], contact: false };
+    shot = { potted: [], firstHit: null, rail: false, st: ruleState() };
     charging = false;
     setLock(false);
     game.state = 'strike';
@@ -811,42 +847,96 @@
 
   function endShot() {
     const p = game.turn, other = 1 - p;
-    const scratch = shot.potted.includes(0);
-    const objects = shot.potted.filter((n) => n !== 0);
-    const sankEight = objects.includes(8);
-    objects.forEach((n) => { game.trays[p].push(n); if (n !== 8) game.scores[p]++; });
-
-    if (sankEight) {
-      const remaining = balls.filter((b) => b.n !== 0 && b.n !== 8 && b.active).length;
-      let winner, note;
-      if (scratch) { winner = other; note = `${name(p)} scratched on the 8-ball.`; }
-      else if (remaining > 0) { winner = other; note = `${name(p)} sank the 8-ball with ${remaining} ball${remaining === 1 ? '' : 's'} still on the table.`; }
-      else {
-        game.scores[p]++;
-        winner = game.scores[p] >= game.scores[other] ? p : other;
-        note = `${name(p)} cleared the 8-ball. Final score ${game.scores[0]} to ${game.scores[1]}.`;
-      }
-      gameOver(winner, note);
-      return;
+    const j = judge(shot.st, shot);
+    game.isBreak = false;
+    if (j.winner !== null) { gameOver(j.winner, `${name(p)} ${j.why}.`); return; }
+    if (j.assign) {
+      game.groups[p] = j.assign;
+      game.groups[other] = j.assign === 'solids' ? 'stripes' : 'solids';
     }
-
-    if (scratch) {
-      placeCueBall();
+    let msg = j.respot8 ? '8-ball respotted. ' : '';
+    if (j.foul) {
       game.turn = other;
-      setStatus(`Scratch. ${name(other)} has ball in hand.`, true);
-    } else if (!shot.contact) {
-      game.turn = other;
-      setStatus(`Missed every ball. ${name(other)} to shoot.`, true);
-    } else if (objects.length) {
-      setStatus(`${name(p)} sank ${objects.length === 1 ? 'the ' + objects[0] : objects.length + ' balls'}. Shoot again.`);
+      game.ballInHand = true;
+      if (!cue.active) placeCueBall();
+      msg += `Foul: ${name(p)} ${j.foul}. ${name(other)} has ball in hand.`;
+    } else if (j.continueTurn) {
+      msg += j.assign ? `${name(p)} takes ${j.assign}. Shoot again.`
+        : shot.st.isBreak ? `${name(p)} made a ball on the break. Table is open. Shoot again.`
+        : `${name(p)} shoots again.`;
     } else {
       game.turn = other;
-      setStatus(`${name(other)} to shoot.`);
+      msg += `${shot.st.isBreak || !game.groups[0] ? 'Table is open. ' : ''}${name(other)} to shoot.`;
     }
+    if (j.respot8) respotEight();
+    if (ruleState().onEight) msg += ` ${name(game.turn)} is on the 8-ball.`;
     game.power = 0;
-    game.state = 'aim';
+    const humanTurn = !(game.mode === 'cpu' && game.turn === 1);
+    game.state = game.ballInHand && humanTurn ? 'place' : 'aim';
+    if (game.state === 'place') msg += ' Move the cue ball and click to place it.';
+    setStatus(msg, !!j.foul);
     renderHud();
     maybeCpuTurn();
+  }
+
+  // ---------- Rules (standard 8-ball) ----------
+  const groupOf = (n) => (n === 8 ? 'eight' : n < 8 ? 'solids' : 'stripes');
+
+  // Snapshot of what the shooter must do, taken before the shot
+  function ruleState() {
+    const mine = game.groups[game.turn];
+    const left = mine ? balls.filter((b) => b.active && b.n !== 0 && b.n !== 8 && groupOf(b.n) === mine).length : 1;
+    return { turn: game.turn, groups: game.groups.slice(), isBreak: game.isBreak, onEight: !!mine && left === 0 };
+  }
+
+  function legalTargets(st) {
+    const mine = st.groups[st.turn];
+    const on = balls.filter((b) => b.active && b.n !== 0);
+    if (st.onEight) return on.filter((b) => b.n === 8);
+    if (!mine) return on.filter((b) => b.n !== 8);
+    return on.filter((b) => groupOf(b.n) === mine);
+  }
+
+  function cueSpotOk(x, z) {
+    if (Math.abs(x) > W / 2 - R || Math.abs(z) > H / 2 - R) return false;
+    return balls.every((b) => b === cue || !b.active || Math.hypot(b.x - x, b.z - z) > 2 * R + 0.002);
+  }
+
+  // Decide a finished shot. shot = { potted, firstHit, rail }.
+  function judge(st, shot) {
+    const me = st.turn, opp = 1 - me;
+    const mine = st.groups[me];
+    const objs = shot.potted.filter((n) => n !== 0);
+    const others = objs.filter((n) => n !== 8);
+    const r = { foul: null, winner: null, why: '', assign: null, respot8: false, continueTurn: false, ownPotted: 0, oppPotted: 0 };
+
+    if (shot.potted.includes(0)) r.foul = 'scratched';
+    else if (shot.firstHit === null) r.foul = 'missed every ball';
+    else if (!st.isBreak) {
+      if (st.onEight && shot.firstHit !== 8) r.foul = 'had to hit the 8-ball first';
+      else if (!mine && shot.firstHit === 8) r.foul = 'hit the 8-ball first';
+      else if (mine && !st.onEight && groupOf(shot.firstHit) !== mine) r.foul = `hit ${mine === 'solids' ? 'a stripe' : 'a solid'} first`;
+      else if (!objs.length && !shot.rail) r.foul = 'drove no ball to a cushion';
+    }
+
+    if (objs.includes(8)) {
+      if (st.isBreak) r.respot8 = true;
+      else if (st.onEight && !r.foul) { r.winner = me; r.why = 'sank the 8-ball'; return r; }
+      else {
+        r.winner = opp;
+        r.why = r.foul ? `sank the 8-ball on a foul (${r.foul})` : 'sank the 8-ball before clearing their group';
+        return r;
+      }
+    }
+
+    let group = mine;
+    if (!mine && !st.isBreak && !r.foul && others.length) { group = groupOf(others[0]); r.assign = group; }
+    if (group) {
+      r.ownPotted = others.filter((n) => groupOf(n) === group).length;
+      r.oppPotted = others.length - r.ownPotted;
+    }
+    r.continueTurn = !r.foul && (st.isBreak ? objs.length > 0 : r.ownPotted > 0);
+    return r;
   }
 
   // ---------- Computer player ----------
@@ -858,29 +948,27 @@
     const list = balls.filter((b) => b.active).map((b) => ({ n: b.n, x: b.x, z: b.z, vx: 0, vz: 0, active: true }));
     const c = list.find((b) => b.n === 0);
     c.vx = Math.cos(angle) * speed; c.vz = Math.sin(angle) * speed;
-    const res = { potted: [], contact: false, cue: c };
+    const res = { potted: [], firstHit: null, rail: false, cue: c };
     const ev = {
-      hit(a, b) { if (a === c || b === c) res.contact = true; },
+      hit(a, b) { if (res.firstHit === null && (a === c || b === c)) res.firstHit = (a === c ? b : a).n; },
       pot(b) { b.active = false; b.vx = b.vz = 0; res.potted.push(b.n); },
-      cushion() {},
+      cushion() { if (res.firstHit !== null) res.rail = true; },
     };
     for (let i = 0; i < SUBSTEPS_PER_SEC * 10; i++) {
       stepWorld(list, STEP, ev);
       if (i % 30 === 0 && list.every((b) => !b.active || (b.vx === 0 && b.vz === 0))) break;
     }
-    res.remaining = list.filter((b) => b.active && b.n !== 0 && b.n !== 8).length;
     return res;
   }
 
-  function scoreResult(res) {
-    const scratch = res.potted.includes(0);
-    const objs = res.potted.filter((n) => n !== 0);
-    if (objs.includes(8)) return !scratch && res.remaining === 0 ? 1000 : -1000;
-    let s = objs.length * 100;
-    if (scratch) s -= 160;
-    if (!res.contact) s -= 90;
+  function scoreResult(res, st) {
+    const j = judge(st, res);
+    if (j.winner === st.turn) return 1000;
+    if (j.winner !== null) return -1000;
+    let s = 100 * j.ownPotted - 30 * j.oppPotted;
+    if (j.foul) s -= 160;
     // Small tiebreak: leave the cue ball off the cushions
-    if (!scratch) s += 10 * Math.min(W / 2 - Math.abs(res.cue.x), H / 2 - Math.abs(res.cue.z));
+    else s += 10 * Math.min(W / 2 - Math.abs(res.cue.x), H / 2 - Math.abs(res.cue.z));
     return s;
   }
 
@@ -899,8 +987,8 @@
   const breathe = () => new Promise((r) => setTimeout(r, 0));
 
   async function planShot() {
-    const others = balls.filter((b) => b.active && b.n !== 0 && b.n !== 8);
-    const targets = others.length ? others : balls.filter((b) => b.active && b.n === 8);
+    const st = ruleState();
+    const targets = legalTargets(st);
     const cands = [];
     for (const t of targets) {
       for (const p of POCKETS) {
@@ -936,7 +1024,7 @@
     const noise = AIM_ERROR[game.level];
     const scored = [];
     for (let i = 0; i < tries.length; i++) {
-      scored.push({ ...tries[i], score: scoreResult(simulate(tries[i].angle, tries[i].speed)) + Math.random() * 2 });
+      scored.push({ ...tries[i], score: scoreResult(simulate(tries[i].angle, tries[i].speed), st) + Math.random() * 2 });
       if (i % 4 === 3) await breathe();   // keep the page animating while thinking
     }
     scored.sort((a, b) => b.score - a.score);
@@ -944,7 +1032,7 @@
     const top = scored.slice(0, 5);
     for (const c of top) {
       let sum = c.score;
-      for (const k of [-1, -0.5, 0.5, 1]) sum += scoreResult(simulate(c.angle + k * noise, c.speed));
+      for (const k of [-1, -0.5, 0.5, 1]) sum += scoreResult(simulate(c.angle + k * noise, c.speed), st);
       c.robust = sum / 5;
       await breathe();
     }
@@ -957,13 +1045,36 @@
     return best;
   }
 
+  // Ball in hand: set up a straight-ish shot on one of our balls
+  function cpuPlaceCue() {
+    const targets = legalTargets(ruleState());
+    let best = null;
+    for (const t of targets) for (const p of POCKETS) {
+      const ax = p.x * 0.985, az = p.z * 0.97;
+      const dx = ax - t.x, dz = az - t.z, dl = Math.hypot(dx, dz);
+      const ux = dx / dl, uz = dz / dl;
+      if (!pathClear(t.x, t.z, ax, az, [cue, t])) continue;
+      for (const back of [0.15, 0.28, 0.45]) {
+        const x = t.x - ux * (2 * R + back), z = t.z - uz * (2 * R + back);
+        if (!cueSpotOk(x, z) || !pathClear(x, z, t.x - ux * 2 * R, t.z - uz * 2 * R, [cue, t])) continue;
+        const sc = 1 / (dl + back);
+        if (!best || sc > best.sc) best = { x, z, sc };
+      }
+    }
+    if (best) {
+      cue.x = best.x; cue.z = best.z;
+      if (cue.mesh) cue.mesh.position.set(cue.x, R, cue.z);
+    }
+  }
+
   function maybeCpuTurn() {
     if (game.mode !== 'cpu' || game.turn !== 1 || game.state !== 'aim') return;
     game.state = 'cpu';
     const token = ++cpuToken;
     setTimeout(async () => {
       if (game.state !== 'cpu' || token !== cpuToken) return;
-      setStatus('Computer is lining up a shot…');
+      if (game.ballInHand) { cpuPlaceCue(); game.ballInHand = false; }
+      setStatus(`Computer is lining up a shot…${ruleState().onEight ? ' It is on the 8-ball.' : ''}`);
       const plan = await planShot();
       if (game.state !== 'cpu' || token !== cpuToken) return;
       const d = plan.angle - game.angle;
@@ -1046,7 +1157,8 @@
   function updateAimVisuals(pull) {
     const lining = game.state === 'aim' || (game.state === 'cpu' && !!cpu);
     const aiming = lining || game.state === 'strike';
-    aimLine.visible = ghost.visible = lining;
+    aimLine.visible = false;   // no guide line from the cue ball; the ghost ring still marks the contact point
+    ghost.visible = lining;
     stick.visible = aiming;
     objLine.visible = false;
     if (!aiming) return;
@@ -1086,6 +1198,7 @@
   }
 
   let drag = null;          // touch: slingshot drag
+  let placing = null;       // touch: dragging the cue ball with ball in hand
   let orbit = null;         // mouse: right-drag turns the table
   let aimLocked = false;
   let charging = false, chargeDir = 1;
@@ -1118,10 +1231,19 @@
         host.setPointerCapture(e.pointerId);
         host.classList.add('orbiting');
         e.preventDefault();
+      } else if (e.button === 0 && game.state === 'place') {
+        placeHere();
       } else if (e.button === 0 && canAim()) {
         setLock(!aimLocked);
         if (!aimLocked) { lastRaw = null; aimAtPointer(e); }
       }
+      return;
+    }
+    if (game.state === 'place') {
+      const p = pointerToTable(e);
+      if (p) moveCueTo(p.x, p.z);
+      placing = e.pointerId;
+      host.setPointerCapture(e.pointerId);
       return;
     }
     if (!canAim()) return;
@@ -1139,6 +1261,11 @@
       applyView();
       return;
     }
+    if (game.state === 'place' && (e.pointerType === 'mouse' || placing === e.pointerId)) {
+      const p = pointerToTable(e);
+      if (p) moveCueTo(p.x, p.z);
+      return;
+    }
     if (e.pointerType === 'mouse') { aimAtPointer(e); return; }
     if (!drag || e.pointerId !== drag.id) return;
     const p = pointerToTable(e);
@@ -1151,6 +1278,7 @@
   });
   const endPointer = (e) => {
     if (orbit && e.pointerId === orbit.id) { orbit = null; host.classList.remove('orbiting'); return; }
+    if (placing !== null && e.pointerId === placing) { placing = null; placeHere(); return; }
     if (!drag || e.pointerId !== drag.id) return;
     drag = null;
     if (game.power >= 0.03) shoot();
@@ -1176,6 +1304,7 @@
     }
     if (e.key === ' ') e.preventDefault();
     if (e.key === 'v' || e.key === 'V') { resetView(); return; }
+    if (game.state === 'place' && e.key === 'Enter') { placeHere(); e.preventDefault(); return; }
     if (!canAim()) return;
     const fine = e.shiftKey ? 0.0025 : 0.02;
     if (e.key === 'ArrowLeft') { game.angle -= fine; setLock(true); e.preventDefault(); }
