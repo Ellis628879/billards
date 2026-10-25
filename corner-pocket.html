@@ -314,13 +314,44 @@
   const SUBSTEPS_PER_SEC = 600;
 
   const POCKETS = [
-    { x: -W / 2 - 0.008, z: -H / 2 - 0.008, r: 0.05, zone: 0.095 },
-    { x:  W / 2 + 0.008, z: -H / 2 - 0.008, r: 0.05, zone: 0.095 },
-    { x: -W / 2 - 0.008, z:  H / 2 + 0.008, r: 0.05, zone: 0.095 },
-    { x:  W / 2 + 0.008, z:  H / 2 + 0.008, r: 0.05, zone: 0.095 },
-    { x: 0, z: -H / 2 - 0.022, r: 0.047, zone: 0.068 },
-    { x: 0, z:  H / 2 + 0.022, r: 0.047, zone: 0.068 },
+    { x: -W / 2 - 0.008, z: -H / 2 - 0.008, r: 0.05 },
+    { x:  W / 2 + 0.008, z: -H / 2 - 0.008, r: 0.05 },
+    { x: -W / 2 - 0.008, z:  H / 2 + 0.008, r: 0.05 },
+    { x:  W / 2 + 0.008, z:  H / 2 + 0.008, r: 0.05 },
+    { x: 0, z: -H / 2 - 0.022, r: 0.047 },
+    { x: 0, z:  H / 2 + 0.022, r: 0.047 },
   ];
+
+  // Cushion noses and pocket jaws as line segments. Balls bounce off these,
+  // so the only way off the bed is through a pocket's throat.
+  const cg = 0.083, sg = 0.056;   // where the cushion noses stop at corner and side pockets
+  const CORNER_JAW = 0.06, SIDE_JAW = 0.045;
+  const SEGS = [], JAWS = [];
+  function seg(x1, z1, x2, z2, jaw) {
+    const s = { x1, z1, x2, z2, dx: x2 - x1, dz: z2 - z1 };
+    s.len2 = s.dx * s.dx + s.dz * s.dz;
+    SEGS.push(s);
+    if (jaw) JAWS.push(s);
+  }
+  for (const sz of [-1, 1]) {
+    const hw = W / 2, hh = H / 2;
+    seg(-hw + cg, sz * hh, -sg, sz * hh);
+    seg(sg, sz * hh, hw - cg, sz * hh);
+    // Side pocket: two slightly narrowing jaws and a back wall
+    seg(-sg, sz * hh, -sg + 0.008, sz * (hh + SIDE_JAW), true);
+    seg(sg, sz * hh, sg - 0.008, sz * (hh + SIDE_JAW), true);
+    seg(-sg + 0.008, sz * (hh + SIDE_JAW), sg - 0.008, sz * (hh + SIDE_JAW));
+  }
+  for (const sx of [-1, 1]) seg(sx * W / 2, -H / 2 + cg, sx * W / 2, H / 2 - cg);
+  for (const sx of [-1, 1]) for (const sz of [-1, 1]) {
+    // Corner pocket: jaws run at 45 degrees into the pocket, then a back wall
+    const ax = sx * (W / 2 - cg), az = sz * H / 2;
+    const bx = sx * W / 2, bz = sz * (H / 2 - cg);
+    const ox = sx * CORNER_JAW, oz = sz * CORNER_JAW;
+    seg(ax, az, ax + ox, az + oz, true);
+    seg(bx, bz, bx + ox, bz + oz, true);
+    seg(ax + ox, az + oz, bx + ox, bz + oz);
+  }
 
   const COLORS = {
     1: '#f2c200', 2: '#1f4fb5', 3: '#d42a20', 4: '#5c2d8c', 5: '#f07612', 6: '#127a3d', 7: '#7d1b1b', 8: '#111111',
@@ -399,13 +430,32 @@
     m.castShadow = true; m.receiveShadow = true;
     scene.add(m);
   }
-  const cg = 0.083, sg = 0.056;
   cushion(-W / 2 + cg, -H / 2, -sg, -H / 2, 0, -1);
   cushion(sg, -H / 2, W / 2 - cg, -H / 2, 0, -1);
   cushion(-W / 2 + cg, H / 2, -sg, H / 2, 0, 1);
   cushion(sg, H / 2, W / 2 - cg, H / 2, 0, 1);
   cushion(-W / 2, -H / 2 + cg, -W / 2, H / 2 - cg, -1, 0);
   cushion(W / 2, -H / 2 + cg, W / 2, H / 2 - cg, 1, 0);
+
+  // Pocket jaws: cushion rubber angled into each pocket
+  for (const j of JAWS) {
+    const len = Math.sqrt(j.len2);
+    const m = new THREE.Mesh(new THREE.BoxGeometry(len, cushionH, 0.026), cushionMat);
+    // push the box to the far side of the playing edge (away from the pocket throat)
+    let nx = -j.dz / len, nz = j.dx / len;
+    const mx = (j.x1 + j.x2) / 2, mz = (j.z1 + j.z2) / 2;
+    const p = nearestPocket(mx, mz);
+    const cx = p.x, cz = p.z;
+    // the throat centre line passes through the pocket; the box goes on the side facing away from it
+    const tx = cx - mx, tz = cz - mz;
+    const along = (tx * j.dx + tz * j.dz) / j.len2;
+    const qx = j.x1 + j.dx * along - cx, qz = j.z1 + j.dz * along - cz;  // from throat line toward this jaw
+    if (nx * qx + nz * qz < 0) { nx = -nx; nz = -nz; }
+    m.position.set(mx + nx * 0.013, cushionH / 2, mz + nz * 0.013);
+    m.rotation.y = -Math.atan2(j.dz, j.dx);
+    m.castShadow = true; m.receiveShadow = true;
+    scene.add(m);
+  }
 
   // Wooden rails
   const railY = cushionH + 0.004;
@@ -589,23 +639,33 @@
         }
       }
     }
-    // Pockets and cushions
+    // Pockets, then cushion noses and jaws
     for (const b of list) {
       if (!b.active) continue;
-      let inZone = false;
       for (const p of POCKETS) {
-        const d = Math.hypot(b.x - p.x, b.z - p.z);
-        if (d < p.r) { ev.pot(b, p); break; }
-        if (d < p.zone) inZone = true;
+        if (Math.hypot(b.x - p.x, b.z - p.z) < p.r) { ev.pot(b, p); break; }
       }
       if (!b.active) continue;
-      if (Math.abs(b.x) > W / 2 + 0.035 || Math.abs(b.z) > H / 2 + 0.035) { ev.pot(b, nearestPocket(b.x, b.z)); continue; }
-      if (inZone) continue;
-      const lx = W / 2 - R, lz = H / 2 - R;
-      if (b.x > lx) { b.x = lx; if (b.vx > 0) { ev.cushion(b.vx); b.vx = -b.vx * CUSHION_E; b.vz *= 0.95; } }
-      if (b.x < -lx) { b.x = -lx; if (b.vx < 0) { ev.cushion(-b.vx); b.vx = -b.vx * CUSHION_E; b.vz *= 0.95; } }
-      if (b.z > lz) { b.z = lz; if (b.vz > 0) { ev.cushion(b.vz); b.vz = -b.vz * CUSHION_E; b.vx *= 0.95; } }
-      if (b.z < -lz) { b.z = -lz; if (b.vz < 0) { ev.cushion(-b.vz); b.vz = -b.vz * CUSHION_E; b.vx *= 0.95; } }
+      // Safety net only; the jaws and back walls keep balls on the table
+      if (Math.abs(b.x) > W / 2 + 0.12 || Math.abs(b.z) > H / 2 + 0.12) { ev.pot(b, nearestPocket(b.x, b.z)); continue; }
+      for (const sg of SEGS) {
+        const t = Math.max(0, Math.min(1, ((b.x - sg.x1) * sg.dx + (b.z - sg.z1) * sg.dz) / sg.len2));
+        const cx = sg.x1 + sg.dx * t, cz = sg.z1 + sg.dz * t;
+        let nx = b.x - cx, nz = b.z - cz;
+        const d2 = nx * nx + nz * nz;
+        if (d2 >= R * R) continue;
+        const d = Math.sqrt(d2);
+        if (d < 1e-9) continue;
+        nx /= d; nz /= d;
+        b.x = cx + nx * R; b.z = cz + nz * R;
+        const vn = b.vx * nx + b.vz * nz;
+        if (vn < 0) {
+          ev.cushion(-vn);
+          const tx = b.vx - vn * nx, tz = b.vz - vn * nz;
+          b.vx = tx * 0.95 - vn * CUSHION_E * nx;
+          b.vz = tz * 0.95 - vn * CUSHION_E * nz;
+        }
+      }
     }
   }
 
